@@ -18,7 +18,7 @@
   <model name="red_box">
     <static>false</static>
     <link name="red_link">
-      <pose>0.6 0.6 0.70 0 0 0</pose>
+      <pose>0.6 0.6 0.70 0 0 0.9</pose>
       <collision name="red_collision">
         <geometry>
           <box>
@@ -30,7 +30,7 @@
         <geometry>
           <box>
             <size>0.06 0.06 0.1</size>
-          </box>
+          </box>.......2.
         </geometry>
         <material>
           <ambient>1 0 0 1</ambient>   <!-- Red -->
@@ -44,7 +44,7 @@
   <model name="green_box">
     <static>false</static>
     <link name="green_link">
-      <pose>0.8 0.6 0.70 0 0 0</pose>
+      <pose>0.8 0.6 0.70 0 0 0.785</pose>
       <collision name="green_collision">
         <geometry>
           <box>
