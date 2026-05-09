@@ -4,11 +4,14 @@ from rclpy.node import Node
 from rclpy.duration import Duration
 import cv2
 import numpy as np
+import math                          # CHANGE 1: added this import (needed for math.degrees)
 from sensor_msgs.msg import Image
 from std_msgs.msg import String
 from cv_bridge import CvBridge
 import tf2_ros
 import tf_transformations
+from gazebo_msgs.srv import GetEntityState
+from geometry_msgs.msg import Pose
 
 class ColorDetector(Node):
     def __init__(self):
@@ -67,64 +70,76 @@ class ColorDetector(Node):
             contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
             for cnt in contours:
-                if cv2.contourArea(cnt) > 1:  # Increased minimum area threshold
-                    x, y, w, h = cv2.boundingRect(cnt)
-                    cx_pix, cy_pix = x + w // 2, y + h // 2
+                if cv2.contourArea(cnt) > 1:
 
-                    # Draw bounding box + label
-                    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 255), 2)
-                    cv2.putText(frame, color_id, (x, y - 10),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                    
+                    rect = cv2.minAreaRect(cnt)
+                    # rect = ( (center_x, center_y), (width, height), angle_degrees )
+                    (cx_pix, cy_pix), (w, h), raw_angle = rect
 
-                    # Convert pixel -> camera frame
-                    Z = 0.1  # Assumed depth/distance
+                    
+                    if w < h:
+                        box_angle_deg = raw_angle + 90.0
+                    else:
+                        box_angle_deg = raw_angle
+
+
+                    box_angle_rad = math.radians(box_angle_deg)
+
+                    cx_pix = int(cx_pix)
+                    cy_pix = int(cy_pix)
+
+                    # Draw rotated bounding box + label on the debug image
+                    box_points = cv2.boxPoints(rect)
+                    box_points = np.int0(box_points)
+                    cv2.drawContours(frame, [box_points], 0, (0, 255, 255), 2)
+                    cv2.putText(frame, f"{color_id} {box_angle_deg:.1f}deg",
+                                (cx_pix - 30, cy_pix - 15),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+
+                   
+                    Z = 0.1
                     Y = (cx_pix - self.cx) * Z / self.fx * -10
                     X = (cy_pix - self.cy) * Z / self.fy
 
                     try:
-                        # Lookup transform camera_link -> panda_link0
-                        # Use Time(seconds=0) for latest available transform
                         t = self.tf_buffer.lookup_transform(
-                            "panda_link0", 
-                            "camera_link", 
+                            "panda_link0",
+                            "camera_link",
                             rclpy.time.Time(),
                             timeout=Duration(seconds=1.0))
 
-                        # Convert to numpy transform matrix
                         trans = np.array([
                             t.transform.translation.x,
                             t.transform.translation.y,
                             t.transform.translation.z
                         ])
-                        
+
                         rot = [
                             t.transform.rotation.x,
                             t.transform.rotation.y,
                             t.transform.rotation.z,
                             t.transform.rotation.w
                         ]
-                        
-                        # Create 4x4 transformation matrix
+
                         T = tf_transformations.quaternion_matrix(rot)
                         T[:3, 3] = trans
 
-                        # Transform point from camera frame to base frame
                         pt_cam = np.array([X, Y, Z, 1.0])
                         pt_base = T @ pt_cam
 
-                        # Adjust X coordinate for blue and green
                         if color_id == "B":
                             pt_base[1] -= 0.0215
                         elif color_id == "G":
                             pt_base[1] += 0.02
 
-                        # Publish color ID + coordinates in panda_link0 frame
-                        msg_str = f"{color_id},{pt_base[0]:.3f},{pt_base[1]:.3f},{pt_base[2]:.3f}"
+                       
+                        msg_str = f"{color_id},{pt_base[0]:.3f},{pt_base[1]:.3f},{pt_base[2]:.3f},{box_angle_rad:.4f}"
                         self.coords_pub.publish(String(data=msg_str))
                         self.get_logger().info(msg_str)
-                        
-                    except (tf2_ros.LookupException, 
-                            tf2_ros.ConnectivityException, 
+
+                    except (tf2_ros.LookupException,
+                            tf2_ros.ConnectivityException,
                             tf2_ros.ExtrapolationException) as e:
                         self.get_logger().warn(f"TF lookup failed: {e}")
                     except Exception as e:
