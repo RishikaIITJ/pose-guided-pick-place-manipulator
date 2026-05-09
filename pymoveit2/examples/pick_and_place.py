@@ -2,11 +2,11 @@
 """
 Pick and place node combining Cartesian and joint-space moves with smooth joint transitions.
 Locks the detected color coordinates before starting the motion.
+Now supports picking boxes at any yaw angle by rotating the gripper to match.
 
 ros2 run pymoveit2 pick_and_place.py --ros-args -p target_color:=R
 ros2 run pymoveit2 pick_and_place.py --ros-args -p target_color:=G
 ros2 run pymoveit2 pick_and_place.py --ros-args -p target_color:=B
-
 """
 
 from threading import Thread
@@ -19,6 +19,9 @@ from pymoveit2 import MoveIt2, GripperInterface
 from pymoveit2.robots import panda
 
 import math
+
+# CHANGE 1: imported Rotation so we can convert yaw angle -> quaternion
+from scipy.spatial.transform import Rotation as R
 
 
 class PickAndPlace(Node):
@@ -33,9 +36,10 @@ class PickAndPlace(Node):
         self.approach_offset = float(
             self.get_parameter("approach_offset").value
         )
+
         # Flags
         self.already_moved = False
-        self.target_coords = None  # Stores the locked coordinates
+        self.target_coords = None
 
         self.callback_group = ReentrantCallbackGroup()
 
@@ -49,7 +53,6 @@ class PickAndPlace(Node):
             callback_group=self.callback_group,
         )
 
-        # Set lower velocity & acceleration for smoother motion
         self.moveit2.max_velocity = 0.1
         self.moveit2.max_acceleration = 0.1
 
@@ -80,28 +83,61 @@ class PickAndPlace(Node):
         self.moveit2.move_to_configuration(self.start_joints)
         self.moveit2.wait_until_executed()
 
+  
+    def yaw_to_quat(self, yaw_rad):
+        base = R.from_quat([0.0, 1.0, 0.0, 0.0])  # xyzw format
+
+        
+        extra = R.from_euler('z', yaw_rad)
+        combined = extra * base
+
+        # Return as [x, y, z, w] list that MoveIt2 expects
+        q = combined.as_quat()  
+        return [float(q[0]), float(q[1]), float(q[2]), float(q[3])]
+
     def coords_callback(self, msg):
         if self.already_moved:
-            return  # Ignore messages once motion starts
+            return
 
         try:
-            color_id, x, y, z = msg.data.split(",")
+            
+            parts = msg.data.split(",")
+
+            if len(parts) == 5:
+                color_id, x, y, z, yaw = parts
+                box_yaw_rad = float(yaw)
+            elif len(parts) == 4:
+                
+                color_id, x, y, z = parts
+                box_yaw_rad = 0.0
+                self.get_logger().warn("Received 4-value message (no angle). Using yaw=0.")
+            else:
+                self.get_logger().error(f"Unexpected message format: {msg.data}")
+                return
+
             color_id = color_id.strip().upper()
 
             if color_id == self.target_color:
-                # Lock coordinates immediately
                 self.target_coords = [float(x), float(y), float(z)]
                 self.get_logger().info(
                     f"Target {self.target_color} locked at: "
-                    f"[{self.target_coords[0]:.3f}, {self.target_coords[1]:.3f}, {self.target_coords[2]:.3f}]"
+                    f"[{self.target_coords[0]:.3f}, {self.target_coords[1]:.3f}, {self.target_coords[2]:.3f}] "
+                    f"yaw={math.degrees(box_yaw_rad):.1f} deg"
                 )
                 self.already_moved = True
 
-                # Use locked coordinates
-                pick_position = [self.target_coords[0], self.target_coords[1], self.target_coords[2] - 0.60]
-                quat_xyzw = [0.0, 1.0, 0.0, 0.0]
+                pick_position = [
+                    self.target_coords[0],
+                    self.target_coords[1],
+                    self.target_coords[2] - 0.60
+                ]
 
-                # --- Pick-and-place sequence ---
+               
+                # NEW:
+                quat_xyzw = self.yaw_to_quat(box_yaw_rad)
+                self.get_logger().info(f"Gripper quaternion: {[f'{v:.3f}' for v in quat_xyzw]}")
+
+                # --- Pick-and-place sequence (identical steps, just uses rotated quat now) ---
 
                 # 1. Move to home joint configuration
                 self.moveit2.move_to_configuration(self.home_joints)
@@ -121,10 +157,9 @@ class PickAndPlace(Node):
                     pick_position[1],
                     pick_position[2] - self.approach_offset
                 ]
-
                 self.moveit2.move_to_pose(
                     position=approach_position,
-                    quat_xyzw=quat_xyzw,
+                    quat_xyzw=quat_xyzw,   # same rotated quaternion used here too
                     cartesian=True
                 )
                 self.moveit2.wait_until_executed()
@@ -133,27 +168,23 @@ class PickAndPlace(Node):
                 self.gripper.close()
                 self.gripper.wait_until_executed()
 
-                # 6. Lift up back to pick_position
-                # self.moveit2.move_to_pose(position=pick_position, quat_xyzw=quat_xyzw)
-                # self.moveit2.wait_until_executed()
-
-                # 7. Move to home joint configuration
+                # 6. Move to home joint configuration
                 self.moveit2.move_to_configuration(self.home_joints)
                 self.moveit2.wait_until_executed()
 
-                # 8. Move to drop joint configuration
+                # 7. Move to drop joint configuration
                 self.moveit2.move_to_configuration(self.drop_joints)
                 self.moveit2.wait_until_executed()
 
-                # 9. Open gripper to release
+                # 8. Open gripper to release
                 self.gripper.open()
                 self.gripper.wait_until_executed()
 
-                # 10. Close gripper
+                # 9. Close gripper
                 self.gripper.close()
                 self.gripper.wait_until_executed()
 
-                # 11. Return to start joint configuration
+                # 10. Return to start joint configuration
                 self.moveit2.move_to_configuration(self.start_joints)
                 self.moveit2.wait_until_executed()
 
